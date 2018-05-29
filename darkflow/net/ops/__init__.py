@@ -19,7 +19,8 @@ op_types = {
 	'route': route,
 	'reorg': reorg,
 	'conv-extract': conv_extract,
-	'extract': extract
+	'extract': extract,
+	'upsample': upsample
 }
 
 def op_create(*args):

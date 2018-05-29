@@ -25,6 +25,17 @@ def loss(self, net_out):
     B, C = m['num'], m['classes']
     HW = H * W # number of grid cells
     anchors = m['anchors']
+    if self.FLAGS['classLoss'] == 'default':
+        size_adjusted_prob = [-1, H*W, B, C]
+    elif self.FLAGS['classLoss'] == 'cross':
+        size_adjusted_prob = [-1, C]
+    elif self.FLAGS['classLoss'] == 'focal':
+        size_adjusted_prob = [-1, C]
+    elif self.FLAGS['classLoss'] == 'lr':
+        size_adjusted_prob = [-1, C]
+    else:
+        print('No such classLoss! Plesse choose one from default, cross, focal and lr')
+        exit()
 
     print('{} loss hyper-parameters:'.format(m['model']))
     print('\tH       = {}'.format(H))
@@ -32,12 +43,13 @@ def loss(self, net_out):
     print('\tbox     = {}'.format(m['num']))
     print('\tclasses = {}'.format(m['classes']))
     print('\tscales  = {}'.format([sprob, sconf, snoob, scoor]))
+    print('\tclassLoss = {}'.format(self.FLAGS['classLoss']))
 
     size1 = [None, HW, B, C]
     size2 = [None, HW, B]
 
     # return the below placeholders
-    _probs = tf.placeholder(tf.float32, size1)
+    _probs = tf.placeholder(tf.float32, size1) #true class
     _confs = tf.placeholder(tf.float32, size2)
     _coord = tf.placeholder(tf.float32, size2 + [4])
     # weights term for L2 loss
@@ -63,10 +75,11 @@ def loss(self, net_out):
     adjusted_c = expit_tensor(net_out_reshape[:, :, :, :, 4])
     adjusted_c = tf.reshape(adjusted_c, [-1, H*W, B, 1])
 
-    adjusted_prob = tf.nn.softmax(net_out_reshape[:, :, :, :, 5:])
-    adjusted_prob = tf.reshape(adjusted_prob, [-1, H*W, B, C])
+    adjusted_prob = net_out_reshape[:, :, :, :, 5:]
+    adjusted_prob = tf.reshape(adjusted_prob, size_adjusted_prob)
 
-    adjusted_net_out = tf.concat([adjusted_coords_xy, adjusted_coords_wh, adjusted_c, adjusted_prob], 3)
+    # adjusted_net_out = tf.concat([adjusted_coords_xy, adjusted_coords_wh, adjusted_c, adjusted_prob], 3)
+    adjusted_net_out = tf.concat([adjusted_coords_xy, adjusted_coords_wh, adjusted_c], 3)
 
     wh = tf.pow(coords[:,:,:,2:4], 2) * np.reshape([W, H], [1, 1, 1, 2])
     area_pred = wh[:,:,:,0] * wh[:,:,:,1]
@@ -95,13 +108,55 @@ def loss(self, net_out):
     proid = sprob * weight_pro
 
     self.fetch += [_probs, confs, conid, cooid, proid]
-    true = tf.concat([_coord, tf.expand_dims(confs, 3), _probs ], 3)
-    wght = tf.concat([cooid, tf.expand_dims(conid, 3), proid ], 3)
+    # true = tf.concat([_coord, tf.expand_dims(confs, 3), _probs ], 3)
+    true = tf.concat([_coord, tf.expand_dims(confs, 3)], 3)
+    # wght = tf.concat([cooid, tf.expand_dims(conid, 3), proid ], 3)
+    wght = tf.concat([cooid, tf.expand_dims(conid, 3)], 3)
+
+    probs_class = tf.reshape(_probs, [-1, C])
+    if self.FLAGS['classLoss'] == 'default':
+        adjusted_prob = tf.nn.softmax(adjusted_prob)
+        loss_class = tf.pow(adjusted_prob - _probs, 2)
+        loss_class = tf.multiply(loss_class, proid)
+        loss_class = tf.reshape(loss_class, [-1, H*W*B*C])
+    elif self.FLAGS['classLoss'] == 'cross':
+        proid = tf.reshape(proid, [-1, C])
+        loss_class = tf.nn.softmax_cross_entropy_with_logits(logits=adjusted_prob, labels=probs_class)
+        proid = tf.reduce_mean(proid, axis=-1)
+        loss_class = tf.multiply(loss_class, proid)
+        loss_class = tf.reshape(loss_class, [-1, H*W*B])
+    elif self.FLAGS['classLoss'] == 'focal':
+        proid = tf.reshape(proid, [-1, C])
+        loss_class = focal_loss(logits=adjusted_prob, labels=probs_class, gamma=2, alpha=0.25, proid=proid)
+        loss_class = tf.reshape(loss_class, [-1, H*W*B])
+    elif self.FLAGS['classLoss'] == 'lr':
+        proid = tf.reshape(proid, [-1, C])
+        loss_class = tf.nn.sigmoid_cross_entropy_with_logits(logits=adjusted_prob, labels=probs_class)
+        loss_class = tf.multiply(loss_class, proid)
+        loss_class = tf.reduce_sum(loss_class, axis=-1)
+        loss_class = tf.reshape(loss_class, [-1, H*W*B])
+
+    loss_class = tf.reduce_sum(loss_class, 1)
+
 
     print('Building {} loss'.format(m['model']))
     loss = tf.pow(adjusted_net_out - true, 2)
-    loss = tf.multiply(loss, wght)
-    loss = tf.reshape(loss, [-1, H*W*B*(4 + 1 + C)])
+    loss = multiply
+    loss = tf.reshape(loss, [-1, H*W*B*(4 + 1)])
     loss = tf.reduce_sum(loss, 1)
+    loss = loss + loss_class
     self.loss = .5 * tf.reduce_mean(loss)
     tf.summary.scalar('{} loss'.format(m['model']), self.loss)
+
+
+def focal_loss(logits, labels, gamma, alpha, proid):
+    per_entry_cross_ent = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits, labels=labels)
+    per_entry_cross_ent = tf.multiply(per_entry_cross_ent, proid)
+    prediction_probabilities = tf.nn.sigmoid(logits)
+    p_t = ((labels * prediction_probabilities) +
+           (1 - labels) * (1 - prediction_probabilities))
+    alpha_weight_factor = (labels * alpha + (1 - labels) * (1 - alpha))
+    modulating_factor = tf.pow(1.0 - p_t, gamma)
+
+    focal_cross_entropy_loss = tf.reduce_sum(modulating_factor * alpha_weight_factor * per_entry_cross_ent, axis=-1)
+    return focal_cross_entropy_loss

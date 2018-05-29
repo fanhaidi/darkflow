@@ -131,3 +131,12 @@ class identity(BaseOp):
 	def __init__(self, inp):
 		self.inp = None
 		self.out = inp
+
+class upsample(BaseOp):
+	def forward(self):
+		inp = self.inp.out
+		shape = inp.get_shape().as_list()
+		_, h, w, c = shape
+		self.out = tf.image.resize_images(inp, [h*2, w*2])
+
+	def speak(self): return 'upsample'

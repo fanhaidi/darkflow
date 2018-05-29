@@ -8,6 +8,8 @@ from .framework import create_framework
 from ..dark.darknet import Darknet
 import json
 import os
+from tensorflow.python.saved_model import builder as saved_model_builder
+import shutil
 
 class TFNet(object):
 
@@ -109,10 +111,14 @@ class TFNet(object):
 		state = identity(self.inp)
 		roof = self.num_layer - self.ntrain
 		self.say(HEADER, LINE)
+		inject_layer_idx = 8
 		for i, layer in enumerate(self.darknet.layers):
 			scope = '{}-{}'.format(str(i),layer.type)
 			args = [layer, state, i, roof, self.feed]
 			state = op_create(*args)
+			if i == inject_layer_idx:
+				# name the layer
+				name = 'Teacher_layer'
 			mess = state.verbalise()
 			self.say(mess)
 		self.say(LINE)
@@ -130,7 +136,9 @@ class TFNet(object):
 		if utility > 0.0:
 			self.say('GPU mode with {} usage'.format(utility))
 			cfg['gpu_options'] = tf.GPUOptions(
-				per_process_gpu_memory_fraction = utility)
+			#	per_process_gpu_memory_fraction = utility
+                allow_growth = True
+                )
 			cfg['allow_soft_placement'] = True
 		else: 
 			self.say('Running entirely on CPU')
@@ -138,20 +146,39 @@ class TFNet(object):
 
 		if self.FLAGS.train: self.build_train_op()
 		
-		if self.FLAGS.summary:
+		if self.FLAGS.summary is not None:
 			self.summary_op = tf.summary.merge_all()
 			self.writer = tf.summary.FileWriter(self.FLAGS.summary + 'train')
+			self.writer = tf.summary.FileWriter(self.FLAGS.summary + 'train', self.graph)
 		
-		self.sess = tf.Session(config = tf.ConfigProto(**cfg))
+		self.sess = tf.Session(config = tf.ConfigProto(**cfg), graph=self.graph)
 		self.sess.run(tf.global_variables_initializer())
+
 
 		if not self.ntrain: return
 		self.saver = tf.train.Saver(tf.global_variables(), 
 			max_to_keep = self.FLAGS.keep)
 		if self.FLAGS.load != 0: self.load_from_ckpt()
 		
-		if self.FLAGS.summary:
+		if self.FLAGS.summary is not None:
 			self.writer.add_graph(self.sess.graph)
+
+		print('self.FLAGS.loadsavepb:', self.FLAGS.loadsavepb)
+		if self.FLAGS.loadsavepb is not None and len(self.FLAGS.loadsavepb) > 0:
+		    # Save to pb file
+		    fan_builder = saved_model_builder.SavedModelBuilder(self.FLAGS.loadsavepb)
+		    go_inputs = tf.saved_model.utils.build_tensor_info(self.inp)
+		    go_outputs = tf.saved_model.utils.build_tensor_info(self.out)
+		    prediction_signature = (
+        	    tf.saved_model.signature_def_utils.build_signature_def(
+            	    inputs={tf.saved_model.signature_constants.PREDICT_INPUTS:go_inputs},
+            	    outputs={tf.saved_model.signature_constants.PREDICT_OUTPUTS:go_outputs},
+            	    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
+
+		    fan_builder.add_meta_graph_and_variables(self.sess, [tf.saved_model.tag_constants.SERVING], signature_def_map = {'predict_inputs':prediction_signature})
+		    fan_builder.save()
+		
+
 
 	def savepb(self):
 		"""
@@ -175,3 +202,5 @@ class TFNet(object):
 		self.say('Saving const graph def to {}'.format(name))
 		graph_def = tfnet_pb.sess.graph_def
 		tf.train.write_graph(graph_def,'./', name, False)
+
+
